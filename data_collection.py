@@ -1,47 +1,243 @@
 from __future__ import print_function
-from six.moves import input
-#need to import MechMind first
-from capture_mechmind import MechCapture
+#Need to import MechEye Device first
+from MechEye import Device
 
-import sys
-import os
-import copy
 import rospy
 import moveit_commander
 import moveit_msgs.msg
-import geometry_msgs.msg
-import time
-import tf
-
-from moveit_commander.conversions import pose_to_list
-from tf.transformations import *
-
-from geometry_msgs.msg import PoseStamped, Pose
-import numpy as np
-from scipy.spatial.transform import Rotation as R
-
+from geometry_msgs.msg import PoseStamped, Pose 
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
+from tf.transformations import *
+import tf2_ros
 
-from datetime import datetime
+import numpy as np
+import cv2
+from cv_bridge import CvBridge
+from scipy.spatial.transform import Rotation as R
+import sys
+import os
+import copy
+import time
 from pathlib import Path
 import colorsys
 
-start_time = time.time()
-rospy.init_node("JA_UR_Program")
 
-import capture_realsense as realsense
+class MechCapture(object): 
+    def __init__(self):
+        self.device = Device()
+        self.device.set_scan_2d_exposure_mode("Auto")
+        self.find_camera_list()
+        self.connect_device_info()
+        self.array = []
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
-mechmind = MechCapture()
+    def show_error(self, status):
+        if status.ok():
+            return
+        print("Error Code : {}".format(status.code()),
+        ",Error Description: {}".format(status.description()))
 
-marker_pub = rospy.Publisher("visualization_marker_array", MarkerArray, queue_size = 2)
-markerArray = MarkerArray()
+
+    def print_device_info(self, num, info):
+        print(" Mech-Eye device index: {}\n".format(str(num)),
+            "Camera Model Name: {}\n".format(info.model()),
+            "Camera ID: {}\n".format(info.id()),
+            "Camera IP: {}\n".format(info.ip()),
+            "Hardware Version: {}\n".format(info.hardware_version()),
+            "Firmware Version: {}\n".format(info.firmware_version()),
+            "...............................................")
+
+    def find_camera_list(self):
+        print("\nFind Mech-Eye devices...")
+        self.device_list = self.device.get_device_list()
+        if len(self.device_list) == 0:
+            print("No Mech-Eye device found.")
+            quit()
+        for i, info in enumerate(self.device_list):
+            self.print_device_info(i, info)
+
+    def connect_device_info(self):
+        # Automatically connect to the first camera
+        status = self.device.connect(self.device_list[0])
+        if not status.ok():
+            self.show_error(status)
+            quit()
+        print("Connected to the Mech-Eye device successfully.")
+
+    def capture_color_image(self, counter, path):
+        color_map = self.device.capture_color()
+        this_img_filename = str(path.joinpath(f"color/{counter:03}.png")) # the :02 is to represent number of digits
+
+        # Saving colour image into file
+        cv2.imwrite(this_img_filename, color_map.data())
+        self.get_mechmind_tf(path, counter)
+        print(f"Saved mechmind_color{counter}.png")
+
+    def capture_depth(self, counter, path):
+        depth_map = self.device.capture_depth()
+        this_img_filename = str(path.joinpath(f"depth/{counter:03}.png")) # the :02 is to represent number of digits
+        cv2.imwrite(this_img_filename, depth_map.data().astype(np.uint16))
+        print(f"Saved mechmind_depth{counter}.png")
+
+    def get_mechmind_tf(self, path_npy_folder, counter):
+        try:
+            trans = self.tfBuffer.lookup_transform("base_link","mechmind_camera/color_map",  rospy.Time(0))
+
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+            rospy.logwarn(str(ex))
+            rospy.Rate(10.0).sleep()
+            return
+        pose_msg = []
+        pose_msg.append(trans.transform.translation.x)
+        pose_msg.append(trans.transform.translation.y)
+        pose_msg.append(trans.transform.translation.z)
+        pose_msg.append(trans.transform.rotation.x)
+        pose_msg.append(trans.transform.rotation.y)
+        pose_msg.append(trans.transform.rotation.z)
+        pose_msg.append(trans.transform.rotation.w)
+        new_matrix = self.get_transform_mat_from_pose(pose_msg)
+        self.array.append(new_matrix)
+        np.array(self.array)
+        npy_filename = str(path_npy_folder.joinpath(f"tf_mechmind_to_baselink"))
+        np.save(npy_filename, self.array)
+
+    def get_transform_mat_from_pose(self, transform):
+        """
+        get transform matrix from ROS pose
+        transform matrix: [4*4]
+        pose: [7], (translation [3], orientation [4])
+        """
+        transform_mat = np.zeros(shape=(4,4))  
+        transform_mat[0:3,0:3] = R.from_quat([transform[3], transform[4], transform[5], transform[6]]).as_matrix()
+        transform_mat[0][3] = transform[0]
+        transform_mat[1][3] = transform[1]
+        transform_mat[2][3] = transform[2]
+        transform_mat[3][3] = 1
+
+        return transform_mat
+    
+    def disconnect(self):
+        self.device.disconnect()
+        print("Disconnected from the Mech-Eye device successfully.")
+
+class RealsenseCapture(object):
+    def __init__(self):
+        self.br = CvBridge()
+        self.pose_array = []
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
+
+    def get_realsense_tf(self, path_npy_folder):
+        try:
+            trans = self.tfBuffer.lookup_transform("base_link",  "realsense_camera", rospy.Time(0))
+
+            pose_msg = []
+            pose_msg.append(trans.transform.translation.x)
+            pose_msg.append(trans.transform.translation.y)
+            pose_msg.append(trans.transform.translation.z)
+            pose_msg.append(trans.transform.rotation.x)
+            pose_msg.append(trans.transform.rotation.y)
+            pose_msg.append(trans.transform.rotation.z)
+            pose_msg.append(trans.transform.rotation.w)
+            new_matrix = self.get_transform_mat_from_pose(pose_msg)
+            self.pose_array.append(new_matrix)
+            np.array(self.pose_array)
+            npy_filename = str(path_npy_folder.joinpath(f"tf_realsense_to_baselink"))
+            np.save(npy_filename, self.pose_array)
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+            rospy.logwarn(str(ex))
+            pass
+
+
+    def get_transform_mat_from_pose(self, transform):
+        """
+        get transform matrix from ROS pose
+        transform matrix: [4*4]
+        pose: [7], (translation [3], orientation [4])
+        """
+        transform_mat = np.zeros(shape=(4,4))  
+        transform_mat[0:3,0:3] = R.from_quat([transform[3], transform[4], transform[5], transform[6]]).as_matrix()
+        transform_mat[0][3] = transform[0]
+        transform_mat[1][3] = transform[1]
+        transform_mat[2][3] = transform[2]
+        transform_mat[3][3] = 1
+
+        return transform_mat
+
+    def capture_realsense_color(self, counter, path):
+        this_img_filename = str(path.joinpath(f"color/{counter:03}.png")) # the :02 is to represent number of digits
+
+        # Saving colour image into file
+        data = rospy.wait_for_message("/camera/color/image_raw", Image)
+        img_color = self.br.imgmsg_to_cv2(data, desired_encoding='bgr8') 
+        cv2.imwrite(this_img_filename, img_color)
+        self.get_realsense_tf(path)
+
+        print(f"Saved realsense_color{counter}.png")
+
+    def capture_realsense_depth(self, counter, path):
+        this_img_filename = str(path.joinpath(f"depth/{counter:03}.png")) # the :02 is to represent number of digits
+        # Saving colour image into file
+        data = rospy.wait_for_message("/camera/aligned_depth_to_color/image_raw", Image)
+        img_depth = self.br.imgmsg_to_cv2(data, desired_encoding='passthrough')
+        cv2.imwrite(this_img_filename, img_depth.astype(np.uint16))
+        print(f"Saved realsense_depth{counter}.png")
+
+    def lookup_transform(self, from_here, to_here):
+        try:
+            tfBuffer = tf2_ros.Buffer()
+            listener = tf2_ros.TransformListener(tfBuffer)
+            camlink2cambase = tfBuffer.lookup_transform(from_here, to_here, rospy.Time(0))
+            camlink2cambase_pose = []
+            camlink2cambase_pose.append(camlink2cambase.transform.translation.x)
+            camlink2cambase_pose.append(camlink2cambase.transform.translation.y)
+            camlink2cambase_pose.append(camlink2cambase.transform.translation.z)
+            camlink2cambase_pose.append(camlink2cambase.transform.rotation.x)
+            camlink2cambase_pose.append(camlink2cambase.transform.rotation.y)
+            camlink2cambase_pose.append(camlink2cambase.transform.rotation.z)
+            camlink2cambase_pose.append(camlink2cambase.transform.rotation.w)
+            return camlink2cambase_pose
+
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException)as ex:
+            rospy.logwarn(str(ex))
+            rospy.Rate(10).sleep()
+            pass
+
+
+    def get_pose_from_transform_mat(self, transform_mat):
+        """
+        get ROS pose from transform matrix
+        pose: [7], (translation [3], orientation [4])
+        transform matrix: [4*4]
+        """
+        quat = R.from_matrix(transform_mat[0:3,0:3]).as_quat()
+        return [transform_mat[0,3], transform_mat[1,3], transform_mat[2,3], quat[0], quat[1], quat[2], quat[3]]
+        
 
 class MoveGroupPythonInterface(object):
 
     def __init__(self):
+        #Initialise Robot and Scene
         super(MoveGroupPythonInterface, self).__init__()
         moveit_commander.roscpp_initialize(sys.argv)
+        self.robot = moveit_commander.RobotCommander()
+        self.scene = moveit_commander.PlanningSceneInterface()
+        self.group_name = "manipulator"
+        self.move_group = moveit_commander.MoveGroupCommander(self.group_name)
+        self.display_trajectory_publisher = rospy.Publisher(
+            "/move_group/display_planned_path",
+            moveit_msgs.msg.DisplayTrajectory,
+            queue_size=20,
+        )
+        self.planning_frame = self.move_group.get_planning_frame()
+        self.eef_link = self.move_group.get_end_effector_link()
+        self.group_names = self.robot.get_group_names()
+        self.box_name = " "
+
+        #Create Folder
         self.dir = Path(__file__).parents[0].joinpath("stored_data_mechmind")
         self.scene_name = self.create_next_folder()
         self.path_image_folder_m = Path(__file__).parents[0].joinpath("stored_data_mechmind", self.scene_name)
@@ -58,33 +254,17 @@ class MoveGroupPythonInterface(object):
         self.path_image_folder_depth = Path(__file__).parents[0].joinpath(self.path_image_folder_r, "depth")
         self.path_image_folder_depth.mkdir(parents=True, exist_ok=True)
 
-        #rospy.init_node("move_group_python_interface_tutorial", anonymous=True)
-        robot = moveit_commander.RobotCommander()
-        scene = moveit_commander.PlanningSceneInterface()
-        group_name = "manipulator"
-        move_group = moveit_commander.MoveGroupCommander(group_name)
-        display_trajectory_publisher = rospy.Publisher(
-            "/move_group/display_planned_path",
-            moveit_msgs.msg.DisplayTrajectory,
-            queue_size=20,
-        )
-        planning_frame = move_group.get_planning_frame()
-        eef_link = move_group.get_end_effector_link()
-        group_names = robot.get_group_names()
+        #Create Marker
+        self.marker_pub = rospy.Publisher("visualization_marker_array", MarkerArray, queue_size = 2)
+        self.markerArray = MarkerArray()
 
-        self.box_name = " "
-        self.robot = robot
-        self.scene = scene
-        self.move_group = move_group
-        self.display_trajectory_publisher = display_trajectory_publisher
-        self.planning_frame = planning_frame
-        self.eef_link = eef_link
-        self.group_names = group_names
-        #Add color to wall
+        #Initialise Cameras
+        self.mechmind = MechCapture()
+        self.realsense = RealsenseCapture()
+
+        #Add color to walls
         self.colors = dict()
         self.scene_pub = rospy.Publisher('planning_scene', moveit_msgs.msg.PlanningScene, queue_size=5)
-        mechmind.find_camera_list()
-        mechmind.connect_device_info()
     
     def create_next_folder(self):
         """
@@ -109,7 +289,7 @@ class MoveGroupPythonInterface(object):
                 max_number = max(max_number, folder_number)
         # Create the next numbered folder
         next_number = max_number + 1
-        print(f"Created folder: {scene_type}_{next_number:03d}") 
+        # print(f"Created folder: {scene_type}_{next_number:03d}") 
         return f"{scene_type}_{next_number:03d}"
 
     def set_cartesian_path(self, scale=1):
@@ -126,7 +306,7 @@ class MoveGroupPythonInterface(object):
         wpose.orientation.w = 0.02674492882736624
         waypoints.append(copy.deepcopy(wpose))
 
-        #Taking samples
+        #Move to calculated waypoints 
         waypoints.extend(self.move_spiral_ellipse())
 
         #Move to default pose
@@ -146,28 +326,6 @@ class MoveGroupPythonInterface(object):
                                                                   )  # jump_threshold
 
         return plan, fraction
-    
-    def plan_cartesian_path(self, pose_object, scale=1):
-        # plan a Cartesian path directly by specifying a list of waypoints for the end-effector to go through
-        print("============ Planning cartesian path ")
-        waypoints = []
-
-        if isinstance(pose_object, list):
-            wpose = self.move_group.get_current_pose().pose
-            wpose.position.x = float(pose_object[0])
-            wpose.position.y = float(pose_object[1])
-            wpose.position.z = float(pose_object[2])
-            wpose.orientation.x = float(pose_object[3])
-            wpose.orientation.y = float(pose_object[4])
-            wpose.orientation.z = float(pose_object[5])
-            wpose.orientation.w = float(pose_object[6])
-            waypoints.append(copy.deepcopy(wpose))
-
-        elif isinstance(pose_object, geometry_msgs.msg._Pose.Pose):
-            waypoints.append(copy.deepcopy(pose_object))
-
-        (plan, fraction) = self.move_group.compute_cartesian_path(waypoints, 0.01, 0.0)
-        return plan, fraction
 
     def display_trajectory(self, plan):
         robot = self.robot
@@ -180,51 +338,46 @@ class MoveGroupPythonInterface(object):
     def execute_plan(self, plan):
         self.move_group.execute(plan, wait=True)
 
-
     def plan_and_execute(self):
         way = self.set_cartesian_path()
-        ct = -2
+        counter = -2
         for i in way:
             new_way = []
-            ct+=1            
+            counter += 1            
             new_way.append(copy.deepcopy(i))
             plan, fraction = self.plan_path(new_way)
             self.display_trajectory(plan)
             self.execute_plan(plan)
             time.sleep(0.5)
-            if ct == -1 or ct == 256:
+            if counter == -1 or counter == num_waypoints:
                 continue
-            self.draw_sphere_array(i, ct)
-            print("\n" + self.scene_name + " | " + str(ct))
-            realsense.capture_realsense_color(ct, self.path_image_folder_r)
-            realsense.capture_realsense_depth(ct, self.path_image_folder_r)
-            mechmind.capture_color_image(ct, self.path_image_folder_m)
-            mechmind.capture_depth(ct, self.path_image_folder_m)
+            self.draw_marker_array(i, counter)
+            print("\n" + self.scene_name + " | " + str(counter))
+            self.realsense.capture_realsense_color(counter, self.path_image_folder_r)
+            self.realsense.capture_realsense_depth(counter, self.path_image_folder_r)
+            self.mechmind.capture_color_image(counter, self.path_image_folder_m)
+            self.mechmind.capture_depth(counter, self.path_image_folder_m)
             
-        mechmind.disconnect()
+        self.mechmind.disconnect()
     
-    def move_spiral_ellipse(self):
+    def move_spiral_ellipse(self, spacing = 0.001):
         # Define parameters
         a = 0.0  # parameter of ellipse
         b = 0.01 # parameter of ellipse
-        h = 0.1  # x-coordinate of center
-        k = 0.35 # y-coordinate of center
+        h = 0.1  # x-coordinate of center, 10cm from baselink
+        k = 0.35 # y-coordinate of center, 35cm from baselink
         width = 0.5 # width of the ellipse
         length = 0.8 # length of the ellipse
-        num_waypoints = 256 # number of waypoints
+        # num_waypoints = 256 # number of waypoints
         radius = 0.65 # distance from tool0 to center
         # Define theta range
         theta_start = 0
         theta_end = 12 * math.pi
-        num_points = 1000
+        num_points = 3000 # if recursion error happens, decrease this number
         d_theta = (theta_end - theta_start) / (num_points - 1)
         theta_list = [theta_start + i * d_theta for i in range(num_points)]
         spiral_ellipse_waypoints = []
         wpose = Pose()
-        total_length = 4.747206936602081 # length of the spiral_ellipse
-        spacing = total_length / num_waypoints # spacing between waypoints
-        current_spacing = 0
-        point_id = 0
         for i in range(len(theta_list)):
             r = a + b * theta_list[i]
             x = r * math.cos(theta_list[i]) * length
@@ -236,28 +389,23 @@ class MoveGroupPythonInterface(object):
                 new_y = y + k
             else:
                 distance = math.sqrt((x+h - new_x) ** 2 + (y+k - new_y) ** 2)
-                current_spacing += distance
-                if current_spacing < spacing:
+                if distance < spacing:
                     # skip this point
                     continue
-            point_id += 1
             new_x = x + h
             new_y = y + k
-            current_spacing = 0
             wpose.position.x = x + h
             wpose.position.y = y + k
             wpose.position.z = z
             item_x_coord = h
             item_y_coord = k
-            curr_pose = self.move_group.get_current_pose().pose
-            curr_pose.position.z = wpose.position.z # Make sure z is at the same height
             if np.abs(wpose.position.x - item_x_coord) > 0.01:
-                x_angle = np.arctan((wpose.position.x - item_x_coord)/curr_pose.position.z)
+                x_angle = np.arctan((wpose.position.x - item_x_coord)/wpose.position.z)
             else:
                 x_angle = 0.0
 
             if np.abs(wpose.position.y - item_y_coord) > 0.01:
-                y_angle = np.arctan((item_y_coord - wpose.position.y)/curr_pose.position.z)
+                y_angle = np.arctan((item_y_coord - wpose.position.y)/wpose.position.z)
             else:
                 y_angle = 0.0
             trans = quaternion_from_euler(y_angle, x_angle, 0) # Pitch, Roll, Yaw
@@ -271,17 +419,17 @@ class MoveGroupPythonInterface(object):
             wpose.orientation.z = camera_quat[2]
             wpose.orientation.w = camera_quat[3]
             spiral_ellipse_waypoints.append(copy.deepcopy(wpose))
-            # Delete the even point if the number of waypoints is greater than the number of desired points
             if len(spiral_ellipse_waypoints) > num_waypoints:
-                spiral_ellipse_waypoints.pop(int(point_id - num_waypoints))
-
+                # print(len(spiral_ellipse_waypoints))
+                return self.move_spiral_ellipse(spacing = spacing + 0.0001)
+        print("Number of waypoints: " + str(len(spiral_ellipse_waypoints)))
         return spiral_ellipse_waypoints
 
-    def draw_sphere_array(self, pose, counter):
+    def draw_marker_array(self, pose, counter):
         marker = Marker()
         marker.header.frame_id = "base_link"
         marker.header.stamp = rospy.Time.now()
-        marker.type = 1 #arrow 0, cube 1, sphere 2 
+        marker.type = 2 #arrow 0, cube 1, sphere 2 
         marker.id = 0
 
         if marker.type == 0:
@@ -304,11 +452,10 @@ class MoveGroupPythonInterface(object):
         hue = counter / 256.0
         rgb = colorsys.hsv_to_rgb(hue, 1, 1)
         scaled_rgb = tuple(int(val * 255) for val in rgb)
-        # print(scaled_rgb)
         marker.color.r = scaled_rgb[0]/255.0
         marker.color.g = scaled_rgb[1]/255.0
         marker.color.b = scaled_rgb[2]/255.0
-        marker.color.a = 0.5
+        marker.color.a = 1
         # Calculate pose of the camera
         tool0_pose = self.get_transform_mat_from_pose([pose.position.x, pose.position.y, pose.position.z, pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
         tool0_to_cam = self.get_transform_mat_from_pose([0.02598823968408548, -0.13109019051557816, 0.05607019307819193, 0.0008547100104746553, 0.056641822866922036, 0.00019581856172904235, -0.9983941781822454])
@@ -321,17 +468,20 @@ class MoveGroupPythonInterface(object):
         marker.pose.orientation.y = cam_pose[4]
         marker.pose.orientation.z = cam_pose[5]
         marker.pose.orientation.w = cam_pose[6]
-        markerArray.markers.append(marker)
-        for m in markerArray.markers:
+        self.markerArray.markers.append(marker)
+        for m in self.markerArray.markers:
             m.id = counter
 
-        marker_pub.publish(markerArray)
+        self.marker_pub.publish(self.markerArray)
 
     def add_box(self):
-
         scene = self.scene
+        if len(self.scene.get_known_object_names()) > 0:
+            print("Walls already added")
+            return True
+        print("Adding Walls")
         rospy.sleep(3)
-        floor_pose = geometry_msgs.msg.PoseStamped()
+        floor_pose = PoseStamped()
         floor_pose.header.frame_id = "base"
         floor_pose.pose.orientation.w = 1.0
         floor_pose.pose.position.x = 0
@@ -342,7 +492,7 @@ class MoveGroupPythonInterface(object):
         self.setColor(box_name, 0.8, 0.8, 0.8, 0.1)
         self.sendColors()
 
-        wall1_pose = geometry_msgs.msg.PoseStamped()
+        wall1_pose = PoseStamped()
         wall1_pose.header.frame_id = "base"
         wall1_pose.pose.orientation.w = 1.0
         wall1_pose.pose.position.x = 0
@@ -353,7 +503,7 @@ class MoveGroupPythonInterface(object):
         self.setColor(box_name, 0.8, 0.8, 0.8, 0.1)
         self.sendColors()
 
-        wall2_pose = geometry_msgs.msg.PoseStamped()
+        wall2_pose = PoseStamped()
         wall2_pose.header.frame_id = "base"
         wall2_pose.pose.orientation.w = 1.0
         wall2_pose.pose.position.x = -0.75
@@ -364,30 +514,29 @@ class MoveGroupPythonInterface(object):
         self.setColor(box_name, 0.8, 0.8, 0.8, 0.1)
         self.sendColors()
 
-        wall3_pose = geometry_msgs.msg.PoseStamped()
+        wall3_pose = PoseStamped()
         wall3_pose.header.frame_id = "base"
         wall3_pose.pose.orientation.w = 1.0
         wall3_pose.pose.position.x = 0
-        wall3_pose.pose.position.y = -0.25 
-        wall3_pose.pose.position.z = 0.25
+        wall3_pose.pose.position.y = -0.30 
+        wall3_pose.pose.position.z = 0.22
         box_name = "obstacles"
         scene.add_box(box_name, wall3_pose, size=(1, 0.01, 0.50))
         self.setColor(box_name, 0.8, 0.8, 0.8, 0.1)
         self.sendColors()
 
-        ceiling_pose = geometry_msgs.msg.PoseStamped()
+        ceiling_pose = PoseStamped()
         ceiling_pose.header.frame_id = "base"
         ceiling_pose.pose.orientation.w = 1.0
         ceiling_pose.pose.position.x = 0
         ceiling_pose.pose.position.y = 0 
         ceiling_pose.pose.position.z = 0.9
-        print("adding box")
         box_name = "ceiling"
         scene.add_box(box_name, ceiling_pose, size=(1, 1, 0.05))
         self.setColor(box_name, 0.8, 0.8, 0.8, 0.1)
         self.sendColors()
         self.box_name = box_name
-        rospy.sleep(5)
+        rospy.sleep(3)
 
     def setColor(self,name,r,g,b,a=0.9):
         color = moveit_msgs.msg.ObjectColor()
@@ -431,8 +580,6 @@ class MoveGroupPythonInterface(object):
         return [transform_mat[0,3], transform_mat[1,3], transform_mat[2,3], quat[0], quat[1], quat[2], quat[3]]
 
 def main():
-    
-
     try:
         bot = MoveGroupPythonInterface()
         bot.add_box()
@@ -444,8 +591,11 @@ def main():
         return
 
 if __name__ == "__main__":
-    # scene = input("Enter scene type: 1 for Simple, 2 for Mixed, 3 for Complicated: ")
-    scene = '2' 
+    start_time = time.time()
+    rospy.init_node("JA_UR_Program")
+    num_waypoints = 256
+    scene = input("Enter scene type: 1 for Simple, 2 for Mixed, 3 for Complex: ")
+    # scene = '3' 
     if scene == '1':
         scene_type = 'A'
     elif scene == '2':
