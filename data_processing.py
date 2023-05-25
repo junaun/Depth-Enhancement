@@ -371,6 +371,10 @@ if __name__ == "__main__":
     real_intrinsic_value = o3d.camera.PinholeCameraIntrinsic(width=1280, height=720, fx = real_cali_param[0], fy = real_cali_param[1], cx = real_cali_param[2], cy = real_cali_param[3])
     delete_folder("C_030")
     try: 
+        latest_folder = get_latest_directory()
+        if len(os.listdir(latest_folder)) <= 3:
+            delete_folder(latest_folder)
+            print(f"Deleting Incomplete Folder: {latest_folder}")
         main()
     except:
         delete_folder(get_latest_directory())
