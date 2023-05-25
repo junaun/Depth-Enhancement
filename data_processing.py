@@ -188,7 +188,7 @@ def chunk_list(lst, n):
 
 #------------------------------------Detect bad result-----------------------------------
 def detect_bad_result(folder):
-    fit = np.load(f"combined_data/{folder}/fitness.npy")
+    fit = np.load(f"{combined_path}/{folder}/fitness.npy")
     bad = []
     q1, q3 = np.percentile(fit, [25, 75])
     iqr = q3 - q1
@@ -201,8 +201,8 @@ def detect_bad_result(folder):
     medians = []
     for num in range(len(fit)): 
         # Load the two images and convert them to grayscale
-        img1 = cv2.imread(f"combined_data/{folder}/color/{num:03}_mech.png",cv2.IMREAD_GRAYSCALE) # queryImage
-        img2 = cv2.imread(f"combined_data/{folder}/color/{num:03}_real.png",cv2.IMREAD_GRAYSCALE) # trainImage
+        img1 = cv2.imread(f"{combined_path}/{folder}/color/{num:03}_mech.png",cv2.IMREAD_GRAYSCALE) # queryImage
+        img2 = cv2.imread(f"{combined_path}/{folder}/color/{num:03}_real.png",cv2.IMREAD_GRAYSCALE) # trainImage
         # Initiate SIFT detector
         sift = cv2.SIFT_create()
         # find the keypoints and descriptors with SIFT
@@ -256,7 +256,7 @@ def detect_bad_result(folder):
         blurred2 = cv2.GaussianBlur(img2, (5, 5), 0)
         edge2 = cv2.Canny(blurred2, 50, 200)
         result = cv2.addWeighted(edge1, alpha, edge2, beta, 0)
-        cv2.imwrite(f"combined_data/{folder}/edge/{num:03}.png",result)
+        cv2.imwrite(f"{combined_path}/{folder}/edge/{num:03}.png",result)
         # cv2.imshow(f"median: {medians[0]}",result)
         # cv2.waitKey(1000)
         # cv2.destroyAllWindows()
@@ -275,8 +275,8 @@ def detect_bad_result(folder):
     #     bad.append(num)
     print("The outliers in the data are:", outliers)
     print("The indices of the outliers are:", outlier_indices)
-    np.save(f"combined_data/{folder}/outlier.npy", outlier_indices)
-    np.save(f"combined_data/{folder}/medians.npy", medians)
+    np.save(f"{combined_path}/{folder}/outlier.npy", outlier_indices)
+    np.save(f"{combined_path}/{folder}/medians.npy", medians)
     print(bad)
 
 #------------------------------------Main----------------------------------------------
@@ -284,8 +284,10 @@ def main():
     start_time = time()
     global raw_mechmind
     global raw_realsense
+    global combined_path
     raw_mechmind = Path(__file__).parents[0].joinpath("stored_data_mechmind")
     raw_realsense = Path(__file__).parents[0].joinpath("stored_data_realsense")
+    combined_path = Path(__file__).parents[0].joinpath("combined_data")
     global folder_to_process
     for folder in scan_dir():
         fitness = []
