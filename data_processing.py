@@ -46,15 +46,23 @@ def make_dir(folder_name):
     path_image_folder_depth.mkdir(parents=True, exist_ok=True)
     path_image_folder_edge = Path(__file__).parents[0].joinpath(path_image_folder, "edge")
     path_image_folder_edge.mkdir(parents=True, exist_ok=True)
+    
+def delete_folder(folder_path):
+    print(f"Deleting {folder_path}\n")
+    shutil.rmtree(folder_path)
 
-def delete_folder(folder_name):
-    print(f"Deleting {folder_name}")
-    shutil.rmtree(f"combined_data/{folder_name}")
+def get_latest_directory(path = Path(__file__).parents[0].joinpath("combined_data")):
+    directories = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+    if not directories:
+        return None
+    latest_directory = max(directories, key=lambda d: os.path.getctime(os.path.join(path, d)))
+    latest_directory_path = os.path.join(path, latest_directory)
+    return latest_directory_path
 
 #----------------------------------------MechMind------------------------------------------
 def process_mechmind_image(num, folder, mech_poses, crop):
-    color = o3d.io.read_image(f"stored_data_mechmind/{folder}/color/{num:03}.png")
-    depth = o3d.io.read_image(f"stored_data_mechmind/{folder}/depth/{num:03}.png")
+    color = o3d.io.read_image(f"{raw_mechmind}/{folder}/color/{num:03}.png")
+    depth = o3d.io.read_image(f"{raw_mechmind}/{folder}/depth/{num:03}.png")
     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(color, depth, convert_rgb_to_intensity=False)
     if crop:    
         pcd1 = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, mech_intrinsic_value, np.linalg.inv(mech_poses[num])).crop(box)
@@ -64,9 +72,9 @@ def process_mechmind_image(num, folder, mech_poses, crop):
 
 # ------------------------------------------RealSense------------------------------------------
 def process_realsense_image(num, folder, real_poses, crop):
-    color = o3d.io.read_image(f"stored_data_realsense/{folder}/color/{num:03}.png")
+    color = o3d.io.read_image(f"{raw_realsense}/{folder}/color/{num:03}.png")
     o3d.io.write_image(f"{path_image_folder_color}/{num:03}_real.png", color)
-    depth = o3d.io.read_image(f"stored_data_realsense/{folder}/depth/{num:03}.png")
+    depth = o3d.io.read_image(f"{raw_realsense}/{folder}/depth/{num:03}.png")
     o3d.io.write_image(f"{path_image_folder_depth}/{num:03}_real.png", depth) 
     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(color, depth, convert_rgb_to_intensity=False)
     if crop:
@@ -274,6 +282,11 @@ def detect_bad_result(folder):
 #------------------------------------Main----------------------------------------------
 def main():
     start_time = time()
+    global raw_mechmind
+    global raw_realsense
+    raw_mechmind = Path(__file__).parents[0].joinpath("stored_data_mechmind")
+    raw_realsense = Path(__file__).parents[0].joinpath("stored_data_realsense")
+    global folder_to_process
     for folder in scan_dir():
         fitness = []
         inlier_rmse = []
@@ -357,6 +370,9 @@ if __name__ == "__main__":
     real_cali_param = [637.5080495052193, 637.707917930532, 646.778180811219, 364.5848168512465, 1000.0]
     real_intrinsic_value = o3d.camera.PinholeCameraIntrinsic(width=1280, height=720, fx = real_cali_param[0], fy = real_cali_param[1], cx = real_cali_param[2], cy = real_cali_param[3])
     delete_folder("C_030")
-    main()
-    delete_folder("C_030")
+    try: 
+        main()
+    except:
+        delete_folder(get_latest_directory())
+        main()
     # detect_bad_result("150523_1212H")
